@@ -1,6 +1,6 @@
 package Chemistry::File::Mopac;
 
-$VERSION = '0.01';
+$VERSION = '0.10';
 
 use Chemistry::Mol 0.07;
 use Carp;
@@ -26,7 +26,7 @@ This module reads Mopac input files.
 
 =cut
 
-Chemistry::Mol->register_type(
+Chemistry::Mol->register_format(
     "mop" => __PACKAGE__,  
 );
 
@@ -41,7 +41,7 @@ Chemistry::Mol->register_type(
 my ($C_sym, $C_1, $C_o1, $C_2, $C_o2, $C_3, $C_o3, $C_len, 
     $C_ang, $C_dih) = 0 .. 9;
 
-sub parsefile {
+sub parse_file {
     my $class = shift;
     my $fname = shift;
     my %options = @_; 
@@ -125,7 +125,7 @@ Returns true if the specified file is a Mopac file.
 
 =cut
 
-sub isfile {
+sub file_is {
     my $class = shift;
     my $fname = shift;
     
