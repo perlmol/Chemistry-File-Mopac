@@ -1,0 +1,6 @@
+Revision history for Perl extension Chemistry::File::Mopac.
+
+0.01  Fri Oct  3 14:00:12 2003
+	- original version; created by h2xs 1.22 with options
+		-AX Chemistry::File::Mopac
+
