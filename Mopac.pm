@@ -1,17 +1,20 @@
 package Chemistry::File::Mopac;
 
 $VERSION = '0.10';
+# $Id$
 
-use 5.006001;
+use 5.006;
 use strict;
 use warnings;
 use base "Chemistry::File";
 use Chemistry::Mol 0.10;
+use Chemistry::InternalCoords;
+use List::Util 'first';
 use Carp;
 
 =head1 NAME
 
-Chemistry::File::Mopac
+Chemistry::File::Mopac - MOPAC 6 input file reader
 
 =head1 SYNOPSIS
 
@@ -23,37 +26,28 @@ Chemistry::File::Mopac
 
 =head1 DESCRIPTION
 
-This module reads Mopac 6 input files. It can handle both internal coordinates
-and cartesian coordinates.
+This module reads MOPAC 6 input files. It can handle both internal coordinates
+and cartesian coordinates. It also extracts molecules from summary files,
+defined as those files that match /SUMMARY OF/ in the third line. Perhaps a
+future version will extract additional information such as the energy and
+dipole from the summary file.
 
 This module registers the C<mop> format with Chemistry::Mol. For detection
 purposes, it assumes that filenames ending in .mop or .zt have the Mopac 
-format.
+format, as well as files whose first line matches /am1|pm3|mndo|mdg|pdg/i 
+(this may change in the future).
+
+When the module reads an input file into $mol, it puts the keywords (usually
+the first line of the file) in $mol->attr("mopac/keywords"), the comments
+(usually everything else on the first three lines) in
+$mol->attr("mopac/comments"), and the internal coordinates for each atom in
+$atom->attr("internal_coords").  This part of the interface is not entirely
+stable, as it is likely that the next version of Chemistry::Atom will include
+explicit support for internal coordinates.
 
 =cut
 
 Chemistry::Mol->register_format("mop");
-
-my ($C_sym, $C_1, $C_o1, $C_2, $C_o2, $C_3, $C_o3, $C_len, 
-    $C_ang, $C_dih) = 0 .. 9;
-my %Pos = (
-    sym     => 0,
-    x       => 1,
-    x_opt   => 2,
-    y       => 3,
-    y_opt   => 4,
-    z       => 5,
-    z_opt   => 6,
-    l       => 1,
-    l_opt   => 2,
-    a       => 3,
-    a_opt   => 4,
-    d       => 5,
-    d_opt   => 6,
-    l_ref   => 7,
-    a_ref   => 8,
-    d_ref   => 9,
-);
 
 sub parse_string {
     my $class = shift;
@@ -65,75 +59,105 @@ sub parse_string {
 
     my $mol = $mol_class->new();
     my @lines = split "\n", $string;
+    local $_;
 
-    # read header
+    # do we have a summary file?
+    if ($lines[2] =~ /SUMMARY OF/) { 
+        # skip everything until FINAL GEOMETRY OBTAINED
+        while (defined ($_ = shift @lines)) {
+            last if /FINAL GEOMETRY OBTAINED/;
+        }
+    }
+
     my @header = splice @lines, 0, 3;
     my @keys;
 
-    $keys[0] = $header[0];
+    # crazy mopac header extension rules
+    push @keys, $header[0];
     if ($keys[0] =~ /&/) {
-        $keys[1] = $header[1];
+        push @keys, $header[1];
         if ($keys[1] =~ /&/) {
-            $keys[2] = $header[2];
+            push @keys, $header[2];
         }
-    } elsif ($keys[0] =~ /\+/) {
-        $keys[1] = $header[1];
+    } elsif ($keys[0] =~ /(\+\s|\s\+)/) {
+        push @keys, $header[1];
         push @header, shift @lines;
-        if ($keys[1] =~ /\+/) {
-            $keys[2] = $header[2];
+        if ($keys[1] =~ /(\+\s|\s\+)/) {
+            push @keys, $header[2];
             push @header, shift @lines;
         }
     }
 
-    $mol->attr(keys_line => join "\n", @keys);
-    $mol->attr(text_line => join "\n", @header[@keys..$#header]);
+    $mol->attr("mop/keywords" => join "\n", @keys);
+    my $comment = join "\n", @header[@keys..$#header];
+    $comment =~ s/\s+$//; 
+    $mol->attr("mopac/comments" => $comment);
+    $comment =~ s/\n/ /g;
+    $mol->name($comment);
     
-    my @coords;
-    my $mode;
     # read coords
+    my @coords;
     for (@lines) {
-      # Sample line below
-      # O    1.232010  1  128.812332  1  274.372818  1    3   2   1
+        # Sample line below
+        # O    1.232010  1  128.812332  1  274.372818  1    3   2   1
         last if /^\s*$/; #blank line
         push @coords, [split];
     }
     
-    if (@coords <= 3 or $coords[3][$Pos{l_ref}]) { # Internal coords
-        $mode = 'internal';
+    # note: according to the MOPAC6 manual, triatomics must always use
+    # internal coordinates; molecules that don't specify connectivity
+    # (columns 7-9) use cartesian coordinates. I use column 8 for testing
+    # because column 7 is sometimes used for the partial charge, adding to
+    # the confusion. I assume that diatomics are always internal as well.
+    if (@coords <= 3 or first {defined $_->[8]} @coords) { 
+        read_internal_coords($mol, @coords);
     } else { # Cartesian coords
-        $mode = 'cartesian';
+        read_cartesian_coords($mol, @coords);
     }
 
-    my @int_coords;
-    for my $coord (@coords) {
-        my $atom = $mol->new_atom(symbol => $coord->[$Pos{sym}]);
-        if ($mode eq 'internal') {
-            $atom->attr("int/len_val" => $coord->[$Pos{l}]);
-            $atom->attr("int/ang_val" => $coord->[$Pos{a}]);
-            $atom->attr("int/dih_val" => $coord->[$Pos{d}]);
-            $atom->attr("mop/len_opt" => $coord->[$Pos{l_opt}]);
-            $atom->attr("mop/ang_opt" => $coord->[$Pos{a_opt}]);
-            $atom->attr("mop/dih_opt" => $coord->[$Pos{d_opt}]);
-            $atom->attr("int/len_ref" => $coord->[$Pos{l_ref}]);
-            $atom->attr("int/ang_ref" => $coord->[$Pos{a_ref}]);
-            $atom->attr("int/dih_ref" => $coord->[$Pos{d_ref}]);
-            push @int_coords, [@$coord[$C_1, $C_len, $C_2, $C_ang, 
-                                        $C_3, $C_dih]]
-        } else { # cartesian
-            croak "Cartesian not yet implemented";
-        }
-    }
-
-    my $i = 1;
-    for my $v (int_to_cart(@int_coords)) {
-        $mol->atoms($i++)->coords($v);
-    }
     return $mol;
 }
 
+sub read_internal_coords {
+    my ($mol, @coords) = @_;
+
+    my $i = 0; # atom index
+
+    for my $coord (@coords) {
+        $i++;
+        my ($symbol, $len_val, $len_opt, $ang_val, $ang_opt,
+            $dih_val, $dih_opt, $len_ref, $ang_ref, $dih_ref) = @$coord;
+
+        # implicit links for the second and third atoms
+        $len_ref ||= 1 if $i == 2;
+        if ($i == 3) {
+            $len_ref ||= 2;
+            $ang_ref = $len_ref == 1 ? 2 : 1;
+        }
+
+        my $atom = $mol->new_atom(symbol => $symbol);
+        my $ic = Chemistry::InternalCoords->new($atom,
+            $len_ref, $len_val,
+            $ang_ref, $ang_val, 
+            $dih_ref, $dih_val);
+        $atom->attr("internal_coords", $ic);
+        $ic->add_cartesians;
+    }
+}
+
+sub read_cartesian_coords {
+    my ($mol, @coords) = @_;
+    for my $coord (@coords) {
+        my ($symbol, $x_val, $x_opt, $y_val, $y_opt,
+            $z_val, $z_opt) = @$coord;
+        my $atom = $mol->new_atom(symbol => $symbol,
+            coords => [$x_val, $y_val, $z_val]);
+    }
+}
+
+
 sub file_is {
-    my $class = shift;
-    my $fname = shift;
+    my ($class, $fname) = @_;
     
     return 1 if $fname =~ /\.(?:mop|zt)$/i;
 
@@ -146,71 +170,26 @@ sub file_is {
 }
 
 
-# Expects a list of array references, where each array lists
-# [ distance, atom#, angle(deg), atom#, dihedral(deg), atom# ]
-# returns a list of vectors with the cartesian coordinates.
-sub int_to_cart {
-    #use Data::Dumper;
-    #local $Data::Dumper::Indent = 0;
-    use Math::VectorReal ":all";
-    #local $Math::VectorReal::FORMAT = "[ %.5f %.5f %.5f ]\n";
-    my (@ints) = @_; #internal coordinates
-    my @carts = (X, Y, Z); # base cartesians
-    my $base = 2; # point 3 is the first 'real' one
-    my $pi180 = 3.1415926535/180;
-    
-    return () unless @ints; # make sure we have something
-    shift @ints; # throw away first point
-    push @carts, vector(0,0,0); # first point at origin
-    @{$ints[0]}[2..5] = (90, -1, -90, 0) if @ints; # refer 1st atom to Y,Z
-    @{$ints[1]}[4..5] = (-90, 0) if @ints > 1; # make second atom refer to Z
-
-    for my $int (@ints) {
-        my $v1 = $carts[$base+$int->[5]]; # 'oldest' point
-        my $v2 = $carts[$base+$int->[3]];
-        my $v3 = $carts[$base+$int->[1]]; # 'newest' point
-        my $d1 = $v1 - $v2;
-        my $d2 = $v3 - $v2;
-
-        # $xp = normal to atoms 1 2 3 
-        my $xp = $d1 x $d2;
-        # $yp = normal to xp and atoms 2 3
-        my $yp = $d2 x $xp;
-
-        my $ang1 = $int->[4] * $pi180;   # dihedral
-        # $r = normal to atoms 2 3 4 (where 4 is the new atom)
-        #      obtained by rotating $xp through $d2
-        my $r = $xp->norm * cos($ang1) + $yp->norm * sin($ang1);
-
-        my $ypp = $d2 x $r; # complete new frame of reference
-        my $ang2 = $int->[2] * $pi180;   # angle
-        my $d3 = -$d2->norm * cos($ang2) + $ypp->norm * sin($ang2);
-
-        $d3 = $d3 * $int->[0]; # mult by distance to $v3
-        my $v4 = $v3 + $d3; # define new point
-        push @carts, $v4;
-        
-        #print "INT: ", Dumper ($int), "\n";
-        #print "v1:$v1 v2:$v2 v3:$v3 d1:$d1 d2:$d2 xp:$xp yp:$yp r:$r ypp:$ypp d3:$d3 v4:$v4\n";
-        #print "v4: $v4";
-    }
-    @{$ints[0]}[2..5] = (0,0,0,0) if @ints; # clean up
-    @{$ints[1]}[4..5] = (0,0) if @ints > 1;         
-    splice @carts, 0, 3; # throw away XYZ
-
-    return @carts;
-}
 
 1;
 
+=head1 VERSION
+
+0.10
 
 =head1 SEE ALSO
 
-L<Chemistry::Mol>
+L<Chemistry::Mol>, L<Chemistry::File>, L<http://www.perlmol.org/>.
 
 =head1 AUTHOR
 
 Ivan Tubert-Brohman <itub@cpan.org>
+
+=head1 COPYRIGHT
+
+Copyright (c) 2004 Ivan Tubert. All rights reserved. This program is free
+software; you can redistribute it and/or modify it under the same terms as
+Perl itself.
 
 =cut
 

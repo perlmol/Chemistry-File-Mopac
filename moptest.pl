@@ -2,12 +2,11 @@
 
 use warnings;
 use strict;
-use blib;
-use lib '../Mol/blib/lib';
-use Chemistry::File::Mopac;
 use Chemistry::Mol;
+use blib;
+use Chemistry::File::Mopac;
 
-my $mol = Chemistry::Mol->read("test.mop", type => "mop");
-#my $mol = Chemistry::Mol->read("test.mop");
+my $mol = Chemistry::Mol->read($ARGV[0] || "test.mop", format => "mop");
 
-print $mol->print;
+printf "%s\n", $mol->formula;
+print $_->coords for $mol->atoms;
