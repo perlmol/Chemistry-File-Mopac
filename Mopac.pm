@@ -1,36 +1,46 @@
 package Chemistry::File::Mopac;
 
-$VERSION = '0.10';
+$VERSION = '0.15';
 # $Id$
 
 use 5.006;
 use strict;
 use warnings;
 use base "Chemistry::File";
-use Chemistry::Mol 0.10;
+use Chemistry::Mol 0.25;
 use Chemistry::InternalCoords;
 use List::Util 'first';
 use Carp;
 
 =head1 NAME
 
-Chemistry::File::Mopac - MOPAC 6 input file reader
+Chemistry::File::Mopac - MOPAC 6 input file reader/writer
 
 =head1 SYNOPSIS
 
     use Chemistry::File::Mopac;
 
+    # read a MOPAC file
     my $mol = Chemistry::Mol->read('file.mop');
+
+    # write a MOPAC file using cartesian coordinates
+    $mol->write('file.mop', coords => 'cartesian');
+
+    # now with internal coordinates
+    $mol->write('file.mop', coords => 'internal');
+
+    # rebuild the Z-matrix from scratch while we are at it
+    $mol->write('file.mop', rebuild => 1);
 
 =cut
 
 =head1 DESCRIPTION
 
-This module reads MOPAC 6 input files. It can handle both internal coordinates
-and cartesian coordinates. It also extracts molecules from summary files,
-defined as those files that match /SUMMARY OF/ in the third line. Perhaps a
-future version will extract additional information such as the energy and
-dipole from the summary file.
+This module reads and writes MOPAC 6 input files. It can handle both internal
+coordinates and cartesian coordinates. It also extracts molecules from summary
+files, defined as those files that match /SUMMARY OF/ in the third line.
+Perhaps a future version will extract additional information such as the energy
+and dipole from the summary file.
 
 This module registers the C<mop> format with Chemistry::Mol. For detection
 purposes, it assumes that filenames ending in .mop or .zt have the Mopac 
@@ -40,24 +50,28 @@ format, as well as files whose first line matches /am1|pm3|mndo|mdg|pdg/i
 When the module reads an input file into $mol, it puts the keywords (usually
 the first line of the file) in $mol->attr("mopac/keywords"), the comments
 (usually everything else on the first three lines) in
-$mol->attr("mopac/comments"), and the internal coordinates for each atom in
-$atom->attr("internal_coords").  This part of the interface is not entirely
-stable, as it is likely that the next version of Chemistry::Atom will include
-explicit support for internal coordinates.
+$mol->attr("mopac/comments") and $mol->name, and the internal coordinates for
+each atom in $atom->internal_coords. 
+
+When writing, the kind of coordinates used depend on the C<coords> option, as
+shown in the SYNOPSIS. Internal coordinates are used by default. If the
+molecule has no internal coordinates defined or the rebuild option is set,
+the build_zmat function from Chemistry::InternalCoords::Builder is used to
+renumber the atoms and build the Z-matrix from scratch.
 
 =cut
 
 Chemistry::Mol->register_format("mop");
 
 sub parse_string {
-    my $class = shift;
-    my $string = shift;
-    my %opts = @_; 
-    my $mol_class = $opts{mol_class} || "Chemistry::Mol";
-    my $atom_class = $opts{atom_class} || "Chemistry::Atom";
-    my $bond_class = $opts{bond_class} || "Chemistry::Bond";
+    my ($class, $string, %opts) = @_;
+
+    my $mol_class  = $opts{mol_class}  || "Chemistry::Mol";
+    my $atom_class = $opts{atom_class} || $mol_class->atom_class;
+    my $bond_class = $opts{bond_class} || $mol_class->bond_class;
 
     my $mol = $mol_class->new();
+
     my @lines = split "\n", $string;
     local $_;
 
@@ -140,7 +154,7 @@ sub read_internal_coords {
             $len_ref, $len_val,
             $ang_ref, $ang_val, 
             $dih_ref, $dih_val);
-        $atom->attr("internal_coords", $ic);
+        $atom->internal_coords($ic);
         $ic->add_cartesians;
     }
 }
@@ -169,17 +183,82 @@ sub file_is {
     return 0;
 }
 
+sub name_is {
+    my ($class, $fname) = @_;
+    $fname =~ /\.(?:mop|zt)$/i;
+}
 
+sub write_string {
+    my ($class, $mol, %opts) = @_;
+    %opts = (coords => "internal", rebuild => 0, %opts);
+    my $ret = $class->format_header($mol);
+    if ($opts{coords} eq 'cartesian') {
+        $ret .= $class->format_line_cart($_) for $mol->atoms;
+    } else {
+        if ($opts{rebuild} or ! $mol->atoms(1)->internal_coords ) {
+            require Chemistry::InternalCoords::Builder;
+            Chemistry::InternalCoords::Builder::build_zmat($mol);
+        }
+        my %index;
+        @index{$mol->atoms} = (1 .. $mol->atoms);
+        $ret .= $class->format_line_ic($_, \%index) for $mol->atoms;
+    }
+    $ret;
+}
+
+
+sub format_header {
+    my ($class, $mol) = @_;
+    my $ret = ($mol->attr("mop/keywords") || '') . "\n";
+    my $name = $mol->name || '';
+    $name =~ s/\n/ /g;
+    $name = substr $name, 0, 80;
+    $ret .= "\n" . $name . "\n";
+    $ret;
+}
+
+sub format_line_ic {
+    my ($class, $atom, $index) = @_;
+    my $ic = $atom->internal_coords;
+    my ($len_ref, $len_val) = $ic->distance;
+    my ($ang_ref, $ang_val) = $ic->angle;
+    my ($dih_ref, $dih_val) = $ic->dihedral;
+    my $len_idx = $index->{$len_ref||0} || 0;
+    my $ang_idx = $index->{$ang_ref||0} || 0;
+    my $dih_idx = $index->{$dih_ref||0} || 0;
+    no warnings 'uninitialized';
+    sprintf "%-2s %8.3f %1d %8.3f %1d %8.3f %1d  %3d %3d %3d\n",
+        $atom->symbol, 
+        $len_val, $len_idx ? 1 : 0, 
+        $ang_val, $ang_idx ? 1 : 0,
+        $dih_val, $dih_idx ? 1 : 0,
+        $len_idx, $ang_idx, $dih_idx ;
+}
+
+sub format_line_cart {
+    my ($class, $atom) = @_;
+    my ($x, $y, $z) = $atom->coords->array;
+    sprintf "%-2s %8.3f 1 %8.3f 1 %8.3f 1\n",
+        $atom->symbol, 
+        $atom->coords->array;
+}
 
 1;
 
+=head1 TO DO
+
+When writing a Mopac file, this version marks all coordinates as variable 
+(for the purpose of geometry optimization by Mopac). A future version should
+have more flexibility.
+
 =head1 VERSION
 
-0.10
+0.15
 
 =head1 SEE ALSO
 
-L<Chemistry::Mol>, L<Chemistry::File>, L<http://www.perlmol.org/>.
+L<Chemistry::Mol>, L<Chemistry::File>, L<Chemistry::InternalCoords>, 
+L<Chemistry::InternalCoords::Builder>, L<http://www.perlmol.org/>.
 
 =head1 AUTHOR
 
