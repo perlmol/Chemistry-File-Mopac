@@ -2,13 +2,12 @@ package Chemistry::File::Mopac;
 
 $VERSION = '0.10';
 
-use Chemistry::Mol 0.07;
-use Carp;
 use 5.006001;
 use strict;
 use warnings;
 use base "Chemistry::File";
-use vars qw(@ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION);
+use Chemistry::Mol 0.10;
+use Carp;
 
 =head1 NAME
 
@@ -18,46 +17,57 @@ Chemistry::File::Mopac
 
     use Chemistry::File::Mopac;
 
+    my $mol = Chemistry::Mol->read('file.mop');
+
 =cut
 
 =head1 DESCRIPTION
 
-This module reads Mopac input files. 
+This module reads Mopac 6 input files. It can handle both internal coordinates
+and cartesian coordinates.
+
+This module registers the C<mop> format with Chemistry::Mol. For detection
+purposes, it assumes that filenames ending in .mop or .zt have the Mopac 
+format.
 
 =cut
 
-Chemistry::Mol->register_format(
-    "mop" => __PACKAGE__,  
-);
-
-=head1 FUNCTIONS
-
-=over 4
-
-=item $my_mol = mop_read($fname, option => value...)
-
-=cut
+Chemistry::Mol->register_format("mop");
 
 my ($C_sym, $C_1, $C_o1, $C_2, $C_o2, $C_3, $C_o3, $C_len, 
     $C_ang, $C_dih) = 0 .. 9;
+my %Pos = (
+    sym     => 0,
+    x       => 1,
+    x_opt   => 2,
+    y       => 3,
+    y_opt   => 4,
+    z       => 5,
+    z_opt   => 6,
+    l       => 1,
+    l_opt   => 2,
+    a       => 3,
+    a_opt   => 4,
+    d       => 5,
+    d_opt   => 6,
+    l_ref   => 7,
+    a_ref   => 8,
+    d_ref   => 9,
+);
 
-sub parse_file {
+sub parse_string {
     my $class = shift;
-    my $fname = shift;
-    my %options = @_; 
-    local $_;
+    my $string = shift;
+    my %opts = @_; 
+    my $mol_class = $opts{mol_class} || "Chemistry::Mol";
+    my $atom_class = $opts{atom_class} || "Chemistry::Atom";
+    my $bond_class = $opts{bond_class} || "Chemistry::Bond";
 
-    open F, $fname or croak "Could not open file $fname";
-
-    my $mol = $options{mol} || Chemistry::Mol->new();
+    my $mol = $mol_class->new();
+    my @lines = split "\n", $string;
 
     # read header
-    my @header;
-    for (1..3) {
-        my $line = <F>;
-        chomp $line;
-        push @header, $line;
-    }
+    my @header = splice @lines, 0, 3;
     my @keys;
 
     $keys[0] = $header[0];
@@ -68,10 +78,10 @@ sub parse_file {
         }
     } elsif ($keys[0] =~ /\+/) {
         $keys[1] = $header[1];
-        push @header, scalar <F>;
+        push @header, shift @lines;
         if ($keys[1] =~ /\+/) {
             $keys[2] = $header[2];
-            push @header, scalar <F>;
+            push @header, shift @lines;
         }
     }
 
@@ -81,13 +91,14 @@ sub parse_file {
     my @coords;
     my $mode;
     # read coords
-    while (<F>) {
+    for (@lines) {
+      # Sample line below
       # O    1.232010  1  128.812332  1  274.372818  1    3   2   1
         last if /^\s*$/; #blank line
         push @coords, [split];
     }
     
-    if (@coords <= 3 or $coords[3][$C_len]) { # Internal coords
+    if (@coords <= 3 or $coords[3][$Pos{l_ref}]) { # Internal coords
         $mode = 'internal';
     } else { # Cartesian coords
         $mode = 'cartesian';
@@ -95,22 +106,23 @@ sub parse_file {
 
     my @int_coords;
     for my $coord (@coords) {
-        my $atom = $mol->new_atom(symbol => $coord->[$C_sym]);
+        my $atom = $mol->new_atom(symbol => $coord->[$Pos{sym}]);
         if ($mode eq 'internal') {
-            $atom->attr("int/len_val" => $coord->[$C_1]);
-            $atom->attr("int/ang_val" => $coord->[$C_2]);
-            $atom->attr("int/dih_val" => $coord->[$C_3]);
-            $atom->attr("mop/len_opt" => $coord->[$C_o1]);
-            $atom->attr("mop/ang_opt" => $coord->[$C_o2]);
-            $atom->attr("mop/dih_opt" => $coord->[$C_o3]);
-            $atom->attr("int/len_ref" => $coord->[$C_len]);
-            $atom->attr("int/ang_ref" => $coord->[$C_ang]);
-            $atom->attr("int/dih_ref" => $coord->[$C_dih]);
-            push @int_coords, [@{$coord}[$C_1, $C_len, $C_2, $C_ang, 
+            $atom->attr("int/len_val" => $coord->[$Pos{l}]);
+            $atom->attr("int/ang_val" => $coord->[$Pos{a}]);
+            $atom->attr("int/dih_val" => $coord->[$Pos{d}]);
+            $atom->attr("mop/len_opt" => $coord->[$Pos{l_opt}]);
+            $atom->attr("mop/ang_opt" => $coord->[$Pos{a_opt}]);
+            $atom->attr("mop/dih_opt" => $coord->[$Pos{d_opt}]);
+            $atom->attr("int/len_ref" => $coord->[$Pos{l_ref}]);
+            $atom->attr("int/ang_ref" => $coord->[$Pos{a_ref}]);
+            $atom->attr("int/dih_ref" => $coord->[$Pos{d_ref}]);
+            push @int_coords, [@$coord[$C_1, $C_len, $C_2, $C_ang, 
                                         $C_3, $C_dih]]
+        } else { # cartesian
+            croak "Cartesian not yet implemented";
         }
     }
-    close F;
 
     my $i = 1;
     for my $v (int_to_cart(@int_coords)) {
@@ -118,12 +130,6 @@ sub parse_file {
     }
     return $mol;
 }
-
-=item is_mop($fname)
-
-Returns true if the specified file is a Mopac file. 
-
-=cut
 
 sub file_is {
     my $class = shift;
@@ -156,7 +162,7 @@ sub int_to_cart {
     return () unless @ints; # make sure we have something
     shift @ints; # throw away first point
     push @carts, vector(0,0,0); # first point at origin
-    @{$ints[0]}[2..5] = (90, -1, -90, 0) if @ints; # refer 1st atom to YZ
+    @{$ints[0]}[2..5] = (90, -1, -90, 0) if @ints; # refer 1st atom to Y,Z
     @{$ints[1]}[4..5] = (-90, 0) if @ints > 1; # make second atom refer to Z
 
     for my $int (@ints) {
@@ -168,6 +174,7 @@ sub int_to_cart {
 
         # $xp = normal to atoms 1 2 3 
         my $xp = $d1 x $d2;
+        # $yp = normal to xp and atoms 2 3
         my $yp = $d2 x $xp;
 
         my $ang1 = $int->[4] * $pi180;   # dihedral
@@ -197,14 +204,9 @@ sub int_to_cart {
 1;
 
 
-=back
-
 =head1 SEE ALSO
 
-L<Chemistry::MacroMol>, L<Chemistry::Mol>
-
-The PDB format description at 
-L<http://www.rcsb.org/pdb/docs/format/pdbguide2.2/guide2.2_frame.html>
+L<Chemistry::Mol>
 
 =head1 AUTHOR
 

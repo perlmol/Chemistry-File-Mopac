@@ -3,7 +3,7 @@
 use warnings;
 use strict;
 use blib;
-use lib '../../Mol/blib/lib';
+use lib '../Mol/blib/lib';
 use Chemistry::File::Mopac;
 use Chemistry::Mol;
 
